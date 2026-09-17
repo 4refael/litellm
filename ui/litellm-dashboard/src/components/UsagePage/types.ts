@@ -71,6 +71,7 @@ export interface TopModelData {
 
 export interface ModelActivityData {
   label: string;
+  key_metadata?: KeyMetadata;
   total_requests: number;
   total_successful_requests: number;
   total_failed_requests: number;
