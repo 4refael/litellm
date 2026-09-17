@@ -623,6 +623,24 @@ def test_key_metadata_includes_recovered_user_email():
     assert meta.user_email == "alice@example.com"
 
 
+def test_key_metadata_includes_user_id_without_user_email():
+    from litellm.proxy.management_endpoints.common_daily_activity import _key_metadata
+
+    meta = _key_metadata(
+        {
+            "dirty-key": {
+                "key_alias": "batch-worker",
+                "team_id": "team-1",
+                "user_id": "user-123",
+            }
+        },
+        "dirty-key",
+    )
+
+    assert meta.user_id == "user-123"
+    assert meta.user_email is None
+
+
 def test_update_breakdown_metrics_includes_user_email():
     from litellm.proxy.management_endpoints.common_daily_activity import update_breakdown_metrics
     from litellm.types.proxy.management_endpoints.common_daily_activity import BreakdownMetrics
@@ -848,6 +866,7 @@ async def test_aggregated_activity_preserves_metadata_for_deleted_keys():
     mock_deleted_key.token = "deleted-key-hash"
     mock_deleted_key.key_alias = "toto-test-2"
     mock_deleted_key.team_id = "69cd4b77-b095-4489-8c46-4f2f31d840a2"
+    mock_deleted_key.user_id = None
 
     mock_prisma.db.litellm_deletedverificationtoken = MagicMock()
     mock_prisma.db.litellm_deletedverificationtoken.find_many = AsyncMock(return_value=[mock_deleted_key])
