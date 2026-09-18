@@ -24,13 +24,6 @@ from tests.test_litellm_rust.support.requests import (
 pytestmark = pytest.mark.requires_rust_extension
 
 
-@pytest.fixture(params=[False, True], ids=["python", "rust"])
-def ocr_backend(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> bool:
-    enabled: Final = bool(request.param)
-    monkeypatch.setenv("LITELLM_RUST", "1" if enabled else "0")
-    return enabled
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 async def test_ocr_contract_upstream_status(
@@ -50,6 +43,54 @@ async def test_ocr_contract_upstream_status(
         await call_native(ocr_server, asynchronous, **arguments)
     assert caught.value.status_code == upstream.status
     assert caught.value.response.status_code == upstream.status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(401, litellm.AuthenticationError), (404, litellm.NotFoundError)],
+    ids=["unauthorized", "not-found"],
+)
+async def test_ocr_contract_client_error_status_maps_to_its_public_exception(
+    ocr_server: RecordingServer,
+    ocr_backend: bool,
+    asynchronous: bool,
+    status: int,
+    error: type[Exception],
+) -> None:
+    ocr_server.enqueue(ResponseSpec(body={"message": "rejected"}, status=status))
+    with pytest.raises(error) as caught:
+        await call_native(ocr_server, asynchronous, num_retries=0)
+    assert caught.value.status_code == status
+    assert caught.value.llm_provider == "mistral"
+    assert caught.value.model == "mistral-ocr-latest"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+async def test_ocr_contract_error_message_ends_with_the_upstream_body(
+    ocr_server: RecordingServer,
+    ocr_backend: bool,
+    asynchronous: bool,
+) -> None:
+    payload: Final = {"message": "provider unavailable"}
+    ocr_server.enqueue(ResponseSpec(body=payload, status=500))
+    with pytest.raises(litellm.InternalServerError) as caught:
+        await call_native(ocr_server, asynchronous, num_retries=0)
+    assert caught.value.message.endswith(f"MistralException - {json.dumps(payload)}")
+
+
+@pytest.mark.asyncio
+async def test_aocr_contract_failure_carries_the_request_retry_count_and_timeout(
+    ocr_server: RecordingServer,
+    ocr_backend: bool,
+) -> None:
+    ocr_server.enqueue(ResponseSpec(body={"message": "provider unavailable"}, status=500))
+    with pytest.raises(litellm.InternalServerError) as caught:
+        await call_native_aocr(ocr_server, num_retries=0, timeout=7.5)
+    assert getattr(caught.value, "num_retries", None) == 0
+    assert getattr(caught.value, "timeout", None) == 7.5
 
 
 @pytest.mark.asyncio
