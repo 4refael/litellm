@@ -362,6 +362,96 @@ async def test_cold_reseed_preserves_concurrent_local_increment(
     assert cache.in_memory_cache.get_cache(key=counter_key) == 100.0 + increment
 
 
+class _UnavailableSpendTable:
+    def __init__(self) -> None:
+        self.read_started: Final = asyncio.Event()
+        self.resume_read: Final = asyncio.Event()
+
+    async def find_unique(self, where: Mapping[str, object]) -> SimpleNamespace:
+        self.read_started.set()
+        await self.resume_read.wait()
+        raise ConnectionError("database unavailable")
+
+
+class _FakeRedisSpendCounter:
+    def __init__(self, existing: float | None) -> None:
+        self.value = existing
+
+    async def async_set_cache(self, key: str, value: float, nx: bool) -> bool:
+        if nx and self.value is not None:
+            return False
+        self.value = value
+        return True
+
+    async def async_get_cache(self, key: str) -> float | None:
+        return self.value
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cold_seeds_from_source_cache_do_not_double_when_db_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from litellm.proxy import proxy_server
+
+    cache: Final = DualCache(in_memory_cache=InMemoryCache())
+    counter_key: Final = "spend:user:db-down-user"
+    cached_spend: Final = 6.0
+    table: Final = _UnavailableSpendTable()
+    user_cache: Final = DualCache(in_memory_cache=InMemoryCache())
+    user_cache.in_memory_cache.set_cache(key="db-down-user", value={"spend": cached_spend})
+    monkeypatch.setattr(proxy_server, "spend_counter_cache", cache)
+    monkeypatch.setattr(proxy_server, "user_api_key_cache", user_cache)
+    monkeypatch.setattr(proxy_server, "prisma_client", SimpleNamespace(db=SimpleNamespace(litellm_usertable=table)))
+
+    first: Final = asyncio.create_task(
+        proxy_server._ensure_spend_counter_initialized(counter_key=counter_key, source_cache_key="db-down-user")
+    )
+    await asyncio.wait_for(table.read_started.wait(), timeout=5)
+    second: Final = asyncio.create_task(
+        proxy_server._ensure_spend_counter_initialized(counter_key=counter_key, source_cache_key="db-down-user")
+    )
+    await asyncio.sleep(0)
+    table.resume_read.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+
+    assert cache.in_memory_cache.get_cache(key=counter_key) == cached_spend
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_seeded", [None, 9.5], ids=["cold", "seeded_by_another_task"])
+async def test_seed_if_absent_keeps_the_in_memory_value_seeded_first(already_seeded: float | None) -> None:
+    cache: Final = DualCache(in_memory_cache=InMemoryCache())
+    counter_key: Final = "spend:key:seed-if-absent"
+    if already_seeded is not None:
+        cache.in_memory_cache.set_cache(key=counter_key, value=already_seeded)
+
+    result: Final = await SpendCounterReseed.seed_if_absent(
+        spend_counter_cache=cache, counter_key=counter_key, base_spend=6.0
+    )
+
+    expected: Final = 6.0 if already_seeded is None else already_seeded
+    assert result == expected
+    assert cache.in_memory_cache.get_cache(key=counter_key) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_seeded", [None, 9.5], ids=["cold", "seeded_by_another_pod"])
+async def test_seed_if_absent_keeps_the_redis_value_seeded_first(already_seeded: float | None) -> None:
+    redis: Final = _FakeRedisSpendCounter(existing=already_seeded)
+    cache: Final = DualCache(in_memory_cache=InMemoryCache())
+    cache.redis_cache = redis  # pyright: ignore[reportAttributeAccessIssue]  # duck-typed fake standing in for RedisCache
+    counter_key: Final = "spend:team:seed-if-absent"
+
+    result: Final = await SpendCounterReseed.seed_if_absent(
+        spend_counter_cache=cache, counter_key=counter_key, base_spend=6.0
+    )
+
+    expected: Final = 6.0 if already_seeded is None else already_seeded
+    assert result == expected
+    assert redis.value == expected
+    assert cache.in_memory_cache.get_cache(key=counter_key) == expected
+
+
 @pytest.mark.asyncio
 async def test_end_user_from_db_reads_the_end_user_row_by_user_id():
     prisma: Final = _FakePrismaClient(end_user_row=SimpleNamespace(user_id="customer-42", spend=0.0))

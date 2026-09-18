@@ -3355,7 +3355,9 @@ async def _ensure_spend_counter_initialized(
             # DB unavailable - fall back to in-process cache (may be stale).
             base_spend: Final = await _get_source_cache_base_spend(source_cache_key=source_cache_key)
             if base_spend > 0:
-                await _increment_spend_counter_cache(counter_key=counter_key, increment=base_spend)
+                await SpendCounterReseed.seed_if_absent(
+                    spend_counter_cache=spend_counter_cache, counter_key=counter_key, base_spend=base_spend
+                )
 
 
 async def _get_source_cache_base_spend(

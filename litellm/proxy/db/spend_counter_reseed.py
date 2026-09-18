@@ -115,6 +115,25 @@ class SpendCounterReseed:
             )
 
     @staticmethod
+    async def seed_if_absent(spend_counter_cache: "DualCache", counter_key: str, base_spend: float) -> float:
+        """Warm a cold counter from a caller-supplied balance, keeping any value a concurrent task seeded first."""
+        if spend_counter_cache.redis_cache is None:
+            cached_spend: Final = spend_counter_cache.in_memory_cache.get_cache(key=counter_key)
+            if cached_spend is not None:
+                return float(cached_spend)
+            spend_counter_cache.in_memory_cache.set_cache(key=counter_key, value=base_spend)
+            return base_spend
+
+        seeded: Final = await spend_counter_cache.redis_cache.async_set_cache(
+            key=counter_key, value=base_spend, nx=True
+        )
+        cached: Final = base_spend if seeded else await spend_counter_cache.redis_cache.async_get_cache(key=counter_key)
+        current_value: Final = float(cached) if cached is not None else base_spend
+        spend_counter_cache.in_memory_cache.set_cache(key=counter_key, value=current_value)
+        record_spend_counter_value(counter_key, current_value)
+        return current_value
+
+    @staticmethod
     async def from_db(prisma_client: Optional["PrismaClient"], counter_key: str) -> float | None:
         """
         Read the authoritative spend for a counter from the DB.
